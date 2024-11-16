@@ -1,4 +1,4 @@
-# Bottle Identification and Liquid Level Analysis System
+# Overview
 ### Adaptive thresholding and contour 
 This is based on my recent computer vision projects.
 
