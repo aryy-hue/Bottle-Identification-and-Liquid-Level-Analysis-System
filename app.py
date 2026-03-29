@@ -18,32 +18,29 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def ensure_upload_folder():
-    """Ensure upload folder exists and is clean"""
     if os.path.exists(app.config['UPLOAD_FOLDER']):
         shutil.rmtree(app.config['UPLOAD_FOLDER'])
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 def process_image(image_path):
-    """Process image to detect bottle and liquid level"""
-    # Read the image
     image = cv2.imread(image_path)
     if image is None:
         return None, "Error: Cannot read image file"
     
-    # Simpan gambar asli untuk ditampilkan
     original_filename = os.path.basename(image_path)
-    
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # Apply adaptive thresholding
-    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+    # Gaussian Blur
+    blurred = cv2.GaussianBlur(gray, (7, 7), 0)
     
-    # Remove small noise using morphological operations
-    kernel = np.ones((3, 3), np.uint8)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+    # Canny Edge
+    edges = cv2.Canny(blurred, 40, 150)
     
-    # Find contours from the thresholded image
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3)
+    
+    # Find contours
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     results = {
         'detected': False,
@@ -55,15 +52,14 @@ def process_image(image_path):
         'processed_image': None
     }
     
-    if contours:
-        # Sort contours by area to find the largest bottle
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)
-        
-        # Process only the largest contour
-        contour = contours[0]
+    image_area = image.shape[0] * image.shape[1]
+    valid_contours = [c for c in contours if cv2.contourArea(c) > (image_area * 0.05)]
+    
+    if valid_contours:
+        valid_contours = sorted(valid_contours, key=cv2.contourArea, reverse=True)
+        contour = valid_contours[0]
         x, y, w, h = cv2.boundingRect(contour)
         
-        # Identify bottle type based on aspect ratio (width/height)
         aspect_ratio = float(w) / h
         if 0.2 < aspect_ratio < 0.5:
             botol_type = "Medicine Bottle"
@@ -71,30 +67,31 @@ def process_image(image_path):
             botol_type = "Blood Transfusion Bottle"
         else:
             botol_type = "Other Medicine Bottles"
-        
-        # Calculate the center position of the bounding box
+            
         center_x = x + w // 2
-        center_y = y + h // 2
-        
-        # Display the bottle type at the top edge of the image
-        top_text_y = max(y - 10, 20)  # Ensure text doesn't go above image
+        top_text_y = max(y - 10, 20)
         cv2.putText(image, botol_type, (x, top_text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         
-        # Determine bottle height to calculate fluid level
-        bottle_height = h
+        roi_gray = blurred[y:y+h, x:x+w]
         
-        # Segment the region to detect the liquid area
-        liquid_region = gray[y:y+h, x:x+w]
+        _, liquid_thresh = cv2.threshold(roi_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
         liquid_height = 0
+        start_scan = int(h * 0.1)
+        end_scan = int(h * 0.95)
         
-        for i in range(liquid_region.shape[0]):
-            row_mean = np.mean(liquid_region[i, :])
-            if row_mean < 150:  # Threshold for liquid detection
+        min_liquid_width = int(w * 0.4) 
+        
+        for i in range(start_scan, end_scan):
+            white_pixels = np.sum(liquid_thresh[i, :] == 255)
+            if white_pixels > min_liquid_width:
                 liquid_height = h - i
                 break
+                
+        # Calculate percentage
+        liquid_percentage = (liquid_height / h) * 100 if h > 0 else 0
+        liquid_percentage = min(max(liquid_percentage, 0), 100) 
         
-        # Calculate the percentage of the liquid volume
-        liquid_percentage = (liquid_height / bottle_height) * 100 if bottle_height > 0 else 0
         level = "Full" if liquid_percentage > 80 else "Half" if liquid_percentage > 30 else "Empty"
         
         # Draw liquid level line
@@ -107,8 +104,6 @@ def process_image(image_path):
         level_text_y = top_text_y + 30
         
         cv2.putText(image, level_text, (level_text_x, level_text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-        
-        # Draw a bounding box around the contour
         cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 3)
         
         # Save processed image
@@ -116,20 +111,17 @@ def process_image(image_path):
         processed_image_path = os.path.join(app.config['UPLOAD_FOLDER'], processed_filename)
         cv2.imwrite(processed_image_path, image)
         
-        # Update results
         results['detected'] = True
         results['bottle_type'] = botol_type
         results['level'] = level
         results['percentage'] = round(liquid_percentage, 2)
         results['processed_image'] = processed_filename
-        results['bounding_box'] = {'x': int(x), 'y': int(y), 'width': int(w), 'height': int(h)}
-    
+        
     return results, None
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        # Check if file was uploaded
         if 'file' not in request.files:
             flash('No file uploaded')
             return redirect(request.url)
@@ -141,7 +133,6 @@ def index():
             return redirect(request.url)
         
         if file and allowed_file(file.filename):
-            # Create clean upload folder
             ensure_upload_folder()
             
             # Generate unique filename to avoid collisions
@@ -151,7 +142,6 @@ def index():
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
             
-            # Process the image
             results, error = process_image(filepath)
             
             if error:
@@ -167,7 +157,6 @@ def index():
 
 @app.route('/clear', methods=['POST'])
 def clear_results():
-    """Clear uploaded files and results"""
     ensure_upload_folder()
     return redirect(url_for('index'))
 
@@ -176,5 +165,4 @@ def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 if __name__ == '__main__':
-    # Run the application
     app.run(debug=True, host='0.0.0.0', port=5000)
